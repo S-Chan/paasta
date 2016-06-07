@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import sys
+from contextlib import contextmanager
 from multiprocessing import Process
 from multiprocessing import Queue
 from Queue import Empty
@@ -167,13 +168,31 @@ def prefix(input_string, component):
     return "%s: %s" % (LOG_COMPONENTS[component]['color'](component), input_string)
 
 
-def paasta_log_line_passes_filter(line, levels, service, components, clusters):
+def check_timestamp_in_range(timestamp, start_time, end_time):
+    """A convenience function to check if a timestamp is within the given start and end times,
+    returns true if start_time or end_time is None
+
+    :param timestamp: The timestamp to check
+    :param start_time: The start of the interval
+    :param end_time: The end of the interval
+    :return: True if timestamp is within start_time and end_time range, False otherwise
+    """
+    if start_time is not None and end_time is not None:
+        return start_time < timestamp < end_time
+    else:
+        return True
+
+
+def paasta_log_line_passes_filter(line, levels, service, components, clusters, start_time=None, end_time=None):
     """Given a (JSON-formatted) log line, return True if the line should be
     displayed given the provided levels, components, and clusters; return False
     otherwise.
     """
     try:
         parsed_line = json.loads(line)
+        timestamp = isodate.parse_datetime(parsed_line.get('timestamp'))
+        if not check_timestamp_in_range(timestamp, start_time, end_time):
+            return False
     except ValueError:
         log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
         return False
@@ -184,6 +203,32 @@ def paasta_log_line_passes_filter(line, levels, service, components, clusters):
             parsed_line.get('cluster') == ANY_CLUSTER
         )
     )
+
+
+def paasta_stdout_line_passes_filter(line, levels, service, components, clusters, start_time=None, end_time=None):
+    try:
+        parsed_line = json.loads(line)
+        timestamp = isodate.parse_datetime(parsed_line.get('timestamp'))
+        if not check_timestamp_in_range(timestamp, start_time, end_time):
+            return False
+
+        return parsed_line.get('component') == 'stdout'
+    except ValueError:
+        log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
+        return False
+
+
+def paasta_stderr_line_passes_filter(line, levels, service, components, clusters, start_time=None, end_time=None):
+    try:
+        parsed_line = json.loads(line)
+        timestamp = isodate.parse_datetime(parsed_line.get('timestamp'))
+        if not check_timestamp_in_range(timestamp, start_time, end_time):
+            return False
+
+        return parsed_line.get('component') == 'stderr'
+    except ValueError:
+        log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
+        return False
 
 
 def extract_utc_timestamp_from_log_line(line):
@@ -239,24 +284,32 @@ def parse_chronos_log_line(line, clusters, service):
         )
 
 
-def marathon_log_line_passes_filter(line, levels, service, components, clusters):
+def marathon_log_line_passes_filter(line, levels, service, components, clusters, start_time=None, end_time=None):
     """Given a (JSON-formatted) log line where the message is a Marathon log line,
     return True if the line should be displayed given the provided service; return False
     otherwise."""
     try:
         parsed_line = json.loads(line)
+
+        timestamp = isodate.parse_datetime(parsed_line.get('timestamp'))
+        if not check_timestamp_in_range(timestamp, start_time, end_time):
+            return False
     except ValueError:
         log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
         return False
     return format_job_id(service, '') in parsed_line.get('message', '')
 
 
-def chronos_log_line_passes_filter(line, levels, service, components, clusters):
+def chronos_log_line_passes_filter(line, levels, service, components, clusters, start_time=None, end_time=None):
     """Given a (JSON-formatted) log line where the message is a Marathon log line,
     return True if the line should be displayed given the provided service; return False
     otherwise."""
     try:
         parsed_line = json.loads(line)
+
+        timestamp = isodate.parse_datetime(parsed_line.get('timestamp'))
+        if not check_timestamp_in_range(timestamp, start_time, end_time):
+            return False
     except ValueError:
         log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
         return False
@@ -277,7 +330,7 @@ def prettify_timestamp(timestamp):
     """Returns more human-friendly form of 'timestamp' without microseconds and
     in local time.
     """
-    dt = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
+    dt = isodate.parse_datetime(timestamp)
     pretty_timestamp = datetime_from_utc_to_local(dt)
     return pretty_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -311,11 +364,15 @@ def prettify_log_line(line, requested_levels):
     """Given a line from the log, which is expected to be JSON and have all the
     things we expect, return a pretty formatted string containing relevant values.
     """
-    pretty_line = ''
     try:
         parsed_line = json.loads(line)
+    except ValueError:
+        log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
+        return "Invalid JSON: %s" % line
+
+    try:
         pretty_level = prettify_level(parsed_line['level'], requested_levels)
-        pretty_line = "%(timestamp)s %(component)s %(cluster)s %(instance)s - %(level)s%(message)s" % ({
+        return "%(timestamp)s %(component)s %(cluster)s %(instance)s - %(level)s%(message)s" % ({
             'timestamp': prettify_timestamp(parsed_line['timestamp']),
             'component': prettify_component(parsed_line['component']),
             'cluster': '[%s]' % parsed_line['cluster'],
@@ -323,13 +380,9 @@ def prettify_log_line(line, requested_levels):
             'level': '%s ' % pretty_level,
             'message': parsed_line['message'],
         })
-    except ValueError:
-        log.debug('Trouble parsing line as json. Skipping. Line: %r' % line)
-        pretty_line = "Invalid JSON: %s" % line
     except KeyError:
         log.debug('JSON parsed correctly but was missing a key. Skipping. Line: %r' % line)
-        pretty_line = "JSON missing keys: %s" % line
-    return pretty_line
+        return "JSON missing keys: %s" % line
 
 
 # The map of name -> LogReader subclasses, used by configure_log.
@@ -386,6 +439,8 @@ class LogReader(object):
 @register_log_reader('scribereader')
 class ScribeLogReader(LogReader):
     SUPPORTS_TAILING = True
+    SUPPORTS_LINE_COUNT = True
+    SUPPORTS_TIME = True
 
     def __init__(self, cluster_map):
         super(ScribeLogReader, self).__init__()
@@ -548,6 +603,165 @@ class ScribeLogReader(LogReader):
                 # traces.
                 log.warn('Terminating.')
                 break
+
+    def print_logs_by_time(self, service, start_time, end_time, levels, components, clusters, raw_mode):
+        scribe_envs = set([])
+        for cluster in clusters:
+            scribe_envs.update(self.determine_scribereader_envs(components, cluster))
+
+        log.info("Would connect to these envs to tail scribe logs: %s" % scribe_envs)
+
+        for scribe_env in scribe_envs:
+            aggregated_logs = []
+
+            if any([component in components for component in DEFAULT_COMPONENTS]):
+                stream_name = get_log_name_for_service(service)
+                ctx = self.scribe_get_from_time(scribe_env, stream_name, start_time, end_time)
+                self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                      components, clusters, aggregated_logs,
+                                                      filter_fn=paasta_log_line_passes_filter,
+                                                      start_time=start_time, end_time=end_time)
+
+            if 'marathon' in components:
+                for cluster in clusters:
+                    stream_name = 'stream_marathon_%s' % cluster
+                    ctx = self.scribe_get_from_time(scribe_env, stream_name, start_time, end_time)
+                    self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                          components, clusters, aggregated_logs,
+                                                          parser_fn=parse_marathon_log_line,
+                                                          filter_fn=marathon_log_line_passes_filter,
+                                                          start_time=start_time, end_time=end_time)
+
+            if 'chronos' in components:
+                for cluster in clusters:
+                    stream_name = 'stream_chronos_%s' % cluster
+                    ctx = self.scribe_get_from_time(scribe_env, stream_name, start_time, end_time)
+                    self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                          components, clusters, aggregated_logs,
+                                                          parser_fn=parse_chronos_log_line,
+                                                          filter_fn=chronos_log_line_passes_filter,
+                                                          start_time=start_time, end_time=end_time)
+
+            if 'stdout' in components or 'app_output' in components:
+                stream_name = get_log_name_for_service(service, prefix='app_output')
+                ctx = self.scribe_get_from_time(scribe_env, stream_name,
+                                                start_time, end_time)
+                self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                      components, clusters, aggregated_logs,
+                                                      filter_fn=paasta_stdout_line_passes_filter,
+                                                      start_time=start_time, end_time=end_time)
+
+            if 'stderr' in components or 'app_output' in components:
+                stream_name = get_log_name_for_service(service, prefix='app_output')
+                ctx = self.scribe_get_from_time(scribe_env, stream_name,
+                                                start_time, end_time)
+                self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                      components, clusters, aggregated_logs,
+                                                      filter_fn=paasta_stderr_line_passes_filter,
+                                                      start_time=start_time, end_time=end_time)
+
+            for line in aggregated_logs:
+                print_log(line, levels, raw_mode)
+
+    def print_last_n_logs(self, service, line_count, levels, components, clusters, raw_mode):
+        scribe_envs = set([])
+        for cluster in clusters:
+            scribe_envs.update(self.determine_scribereader_envs(components, cluster))
+
+        log.info("Would connect to these envs to tail scribe logs: %s" % scribe_envs)
+
+        for scribe_env in scribe_envs:
+            aggregated_logs = []
+
+            if any([component in components for component in DEFAULT_COMPONENTS]):
+                stream_name = get_log_name_for_service(service)
+                ctx = self.scribe_get_last_n_lines(scribe_env, stream_name, line_count)
+                self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                      components, clusters, aggregated_logs,
+                                                      filter_fn=paasta_log_line_passes_filter)
+
+            if 'marathon' in components:
+                for cluster in clusters:
+                    stream_name = 'stream_marathon_%s' % cluster
+                    ctx = self.scribe_get_last_n_lines(scribe_env, stream_name, line_count)
+                    self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                          components, clusters, aggregated_logs,
+                                                          parser_fn=parse_marathon_log_line,
+                                                          filter_fn=marathon_log_line_passes_filter)
+
+            if 'chronos' in components:
+                for cluster in clusters:
+                    stream_name = 'stream_chronos_%s' % cluster
+                    ctx = self.scribe_get_last_n_lines(scribe_env, stream_name, line_count)
+                    self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                          components, clusters, aggregated_logs,
+                                                          parser_fn=parse_chronos_log_line,
+                                                          filter_fn=chronos_log_line_passes_filter)
+
+            if 'stdout' in components or 'app_output' in components:
+                stream_name = get_log_name_for_service(service, prefix='app_output')
+                ctx = self.scribe_get_last_n_lines(scribe_env, stream_name, line_count)
+                self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                      components, clusters, aggregated_logs,
+                                                      filter_fn=paasta_stdout_line_passes_filter)
+
+            if 'stderr' in components or 'app_output' in components:
+                stream_name = get_log_name_for_service(service, prefix='app_output')
+                ctx = self.scribe_get_last_n_lines(scribe_env, stream_name, line_count)
+                self.filter_and_aggregate_scribe_logs(ctx, scribe_env, stream_name, levels, service,
+                                                      components, clusters, aggregated_logs,
+                                                      filter_fn=paasta_stderr_line_passes_filter)
+
+            for line in aggregated_logs:
+                print_log(line, levels, raw_mode)
+
+    def filter_and_aggregate_scribe_logs(self, scribe_reader_ctx, scribe_env, stream_name,
+                                         levels, service, componenets, clusters,
+                                         aggregated_logs, parser_fn=None, filter_fn=None,
+                                         start_time=None, end_time=None):
+        with scribe_reader_ctx as scribe_reader:
+            try:
+                for line in scribe_reader:
+                    if parser_fn:
+                        line = parser_fn(line, clusters, service)
+                    if filter_fn:
+                        if filter_fn(line, levels, service, componenets, clusters,
+                                     start_time=start_time, end_time=end_time):
+                            aggregated_logs.append(line)
+            except StreamTailerSetupError:
+                log.error("Failed to setup stream tailing for %s in %s" % (stream_name, scribe_env))
+                log.error("Don't Panic! This can happen the first time a service is deployed because the log")
+                log.error("doesn't exist yet. Please wait for the service to be deployed in %s and try again."
+                          % scribe_env)
+                raise
+
+    def scribe_get_from_time(self, scribe_env, stream_name, start_time, end_time):
+        # Scribe connection details
+        host_and_port = scribereader.get_env_scribe_host(scribe_env, True)
+        host = host_and_port['host']
+        port = host_and_port['port']
+
+        # Annoyingly enough, scribe needs special handling if we're trying to retrieve logs from today
+        if start_time.date() == datetime.date.today() or end_time.date() == datetime.date.today():
+            @contextmanager
+            def fake_context():
+                yield scribereader.get_stream_tailer(stream_name, host, port, True, -1)
+
+            return fake_context()
+
+        return scribereader.get_stream_reader(stream_name, host, port, start_time, end_time)
+
+    def scribe_get_last_n_lines(self, scribe_env, stream_name, line_count):
+        # Scribe connection details
+        host_and_port = scribereader.get_env_scribe_host(scribe_env, True)
+        host = host_and_port['host']
+        port = host_and_port['port']
+
+        @contextmanager
+        def fake_context():
+            yield scribereader.get_stream_tailer(stream_name, host, port, True, line_count)
+
+        return fake_context()
 
     def scribe_tail(self, scribe_env, stream_name, service, levels, components, clusters, queue, filter_fn,
                     parse_fn=None):
