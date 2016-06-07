@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import datetime
 import json
 from multiprocessing import Queue
 from Queue import Empty
@@ -49,6 +50,27 @@ def test_cluster_to_scribe_env_bad():
         with raises(SystemExit) as sys_exit:
             scribe_log_reader.cluster_to_scribe_env('dne')
             assert sys_exit.value.code == 1
+
+
+def test_check_timestamp_in_range_with_none_arguments():
+    assert logs.check_timestamp_in_range(timestamp=None, start_time=None, end_time=None) is True
+    assert logs.check_timestamp_in_range(datetime.datetime.utcnow(), None, None) is True
+
+
+def test_check_timestamp_in_range_false():
+    timestamp = datetime.datetime.utcnow()
+    start_time, end_time = logs.generate_start_end_time("10m", "5m")
+
+    assert logs.check_timestamp_in_range(timestamp, start_time, end_time) is False
+
+
+def test_check_timestamp_in_range_true():
+    timestamp = isodate.parse_datetime("2016-06-07T23:46:03+00:00")
+
+    start_time = isodate.parse_datetime("2016-06-07T23:40:03+00:00")
+    end_time = isodate.parse_datetime("2016-06-07T23:50:03+00:00")
+
+    assert logs.check_timestamp_in_range(timestamp, start_time, end_time) is True
 
 
 def test_paasta_log_line_passes_filter_true():
@@ -119,6 +141,39 @@ def test_paasta_log_line_passes_filter_false_when_line_not_valid_json():
     # component must be legit as well as not in the list of requested
     # components
     assert logs.paasta_log_line_passes_filter(line, levels, service, components, clusters) is False
+
+
+def test_paasta_log_line_passes_filter_true_when_valid_time():
+    service = 'fake_service'
+    levels = ['fake_level1', 'fake_level2']
+    clusters = ['fake_cluster1', 'fake_cluster2']
+    instance = 'fake_instance'
+    components = ['build', 'deploy']
+    line = 'fake_line'
+    formatted_line = format_log_line(levels[0], clusters[0], service, instance, components[0], line,
+                                     timestamp="2016-06-07T23:46:03+00:00")
+
+    start_time = isodate.parse_datetime("2016-06-07T23:40:03+00:00")
+    end_time = isodate.parse_datetime("2016-06-07T23:50:03+00:00")
+
+    assert logs.paasta_log_line_passes_filter(formatted_line, levels, service, components, clusters,
+                                              start_time=start_time, end_time=end_time) is True
+
+
+def test_paasta_log_line_passes_filter_false_when_invalid_time():
+    service = 'fake_service'
+    levels = ['fake_level1', 'fake_level2']
+    clusters = ['fake_cluster1', 'fake_cluster2']
+    instance = 'fake_instance'
+    components = ['build', 'deploy']
+    line = 'fake_line'
+    formatted_line = format_log_line(levels[0], clusters[0], service, instance, components[0], line,
+                                     timestamp=isodate.datetime_isoformat(datetime.datetime.utcnow()))
+
+    start_time, end_time = logs.generate_start_end_time(from_string="5m", to_string="3m")
+
+    assert logs.paasta_log_line_passes_filter(formatted_line, levels, service, components, clusters,
+                                              start_time=start_time, end_time=end_time) is False
 
 
 def test_marathon_log_line_passes_filter_true_when_service_name_in_string():
