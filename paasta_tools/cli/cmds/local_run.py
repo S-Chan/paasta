@@ -381,6 +381,37 @@ def get_container_name():
     return 'paasta_local_run_%s_%s' % (get_username(), randint(1, 999999))
 
 
+def check_for_sh(command):
+    """
+    Check if a command contains "/bin/sh -c"
+    :param command: command to check.
+    :return: True if sh -c is found, false otherwise.
+    """
+
+    if isinstance(command, basestring):
+        command = shlex.split(command)
+
+    sh_found = False
+    for sh_command in ['sh', 'bash', 'zsh']:
+        if sh_command == command[0] or '/bin/{0}'.format(sh_command) == command[0]:
+            sh_found = True
+            break
+
+    if sh_found:
+        # The command starts with a shell, so let's look for "-c".
+        # We either stop if we find -c or if we run out of switches to check.
+        # I could have used a string's find method, but then I wouldn't be able to
+        # know if -c is coming fron /bin/sh or from some other command further down,
+        # for example '/bin/sh /tmp/something.sh -c 1'.
+        for idx, tok in enumerate(command[1:]):
+            if tok == '-c':
+                return True, idx + 1  # +1 because we skipped the actual shell command
+            elif tok[0] != '-':
+                # No more switches to process
+                break
+    return False, -1
+
+
 def get_docker_run_cmd(memory, random_port, container_name, volumes, env, interactive,
                        docker_hash, command, hostname, net):
     cmd = ['docker', 'run']
@@ -405,10 +436,15 @@ def get_docker_run_cmd(memory, random_port, container_name, volumes, env, intera
         cmd.append('--detach=true')
     cmd.append('%s' % docker_hash)
     if command:
-        cmd.extend((
-            'sh', '-c',
-            ' '.join(pipes.quote(part) for part in command)
-        ))
+        sh_found, idx = check_for_sh(command)
+        if not sh_found:
+            cmd.extend((
+                'sh', '-c'
+            ))
+            cmd.append(pipes.quote(' '.join(command)))
+        else:
+            cmd.extend(command[:idx + 1])
+            cmd.append(pipes.quote(' '.join(command[idx + 1:])))
     return cmd
 
 
@@ -515,8 +551,7 @@ def run_docker_container(
         hostname=hostname,
         net=net,
     )
-    # http://stackoverflow.com/questions/4748344/whats-the-reverse-of-shlex-split
-    joined_docker_run_cmd = ' '.join(pipes.quote(word) for word in docker_run_cmd)
+    joined_docker_run_cmd = ' '.join(docker_run_cmd)
     healthcheck_mode, healthcheck_data = get_healthcheck_for_instance(
         service, instance, instance_config, random_port, soa_dir=soa_dir)
 
