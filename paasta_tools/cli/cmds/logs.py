@@ -803,8 +803,7 @@ class ScribeLogReader(LogReader):
         # context here is necessary
         @contextmanager
         def fake_context():
-            iterable = scribereader.get_stream_tailer(stream_name, host, port, True, line_count)
-            yield iterable
+            yield scribereader.get_stream_tailer(stream_name, host, port, True, line_count)
 
         return fake_context()
 

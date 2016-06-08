@@ -654,6 +654,32 @@ def test_scribereader_print_last_n_logs():
         assert mock_scribereader.get_stream_tailer.call_count == 10
 
 
+def test_scribereader_print_logs_by_time():
+    service = 'fake_service'
+    levels = ['fake_level1', 'fake_level2']
+    clusters = ['fake_cluster1']
+    components = logs.DEFAULT_COMPONENTS + ['marathon', 'chronos', 'stdout', 'stderr']
+
+    with mock.patch('paasta_tools.cli.cmds.logs.scribereader', autospec=True) as mock_scribereader, \
+            mock.patch('paasta_tools.cli.cmds.logs.ScribeLogReader.determine_scribereader_envs', autospec=True) \
+            as determine_scribereader_envs_patch:
+
+        determine_scribereader_envs_patch.return_value = ['env1', 'env2']
+        fake_iter = mock.MagicMock()
+        fake_iter.__iter__.return_value = ["""{"cluster":"fake_cluster1","component":"stderr","instance":"main",
+                                           "level":"debug","message":"testing",
+                                           "timestamp":"2016-06-08T06:31:52.706609135Z"}"""] * 100
+        mock_scribereader.get_stream_tailer.return_value = fake_iter
+
+        start_time, end_time = logs.generate_start_end_time()
+        logs.ScribeLogReader(cluster_map={}).print_logs_by_time(service, start_time, end_time,
+                                                                levels, components, clusters,
+                                                                raw_mode=False)
+
+        # one call per component per environment
+        assert mock_scribereader.get_stream_tailer.call_count == 10
+
+
 def test_tail_paasta_logs_ctrl_c_in_queue_get():
     service = 'fake_service'
     levels = ['fake_level1', 'fake_level2']
