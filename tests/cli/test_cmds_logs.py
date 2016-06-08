@@ -604,7 +604,7 @@ def test_prettify_log_line_valid_json_requested_level_is_only_event():
     assert parsed_line['level'] not in actual
 
 
-def test_run_code_over_scribe_envs():
+def test_scribereader_run_code_over_scribe_envs():
     clusters = ['fake_cluster1', 'fake_cluster2']
     components = logs.DEFAULT_COMPONENTS + ['marathon', 'chronos', 'stdout', 'stderr']
 
@@ -670,6 +670,7 @@ def test_scribereader_print_logs_by_time():
                                            "level":"debug","message":"testing",
                                            "timestamp":"2016-06-08T06:31:52.706609135Z"}"""] * 100
         mock_scribereader.get_stream_tailer.return_value = fake_iter
+        mock_scribereader.get_stream_reader.return_value = fake_iter
 
         start_time, end_time = logs.generate_start_end_time()
         logs.ScribeLogReader(cluster_map={}).print_logs_by_time(service, start_time, end_time,
@@ -679,11 +680,18 @@ def test_scribereader_print_logs_by_time():
         # one call per component per environment
         assert mock_scribereader.get_stream_tailer.call_count == 10
 
+        start_time, end_time = logs.generate_start_end_time("3d", "2d")
+        logs.ScribeLogReader(cluster_map={}).print_logs_by_time(service, start_time, end_time,
+                                                                levels, components, clusters,
+                                                                raw_mode=False)
+
+        assert mock_scribereader.get_stream_reader.call_count == 10
+
 
 def test_tail_paasta_logs_ctrl_c_in_queue_get():
     service = 'fake_service'
     levels = ['fake_level1', 'fake_level2']
-    components = ['deploy', 'monitoring']
+    components = ['deploy', 'monitoring', 'chronos', 'stdout', 'stderr']
     clusters = ['fake_cluster1', 'fake_cluster2']
     with contextlib.nested(
         mock.patch('paasta_tools.cli.cmds.logs.ScribeLogReader.determine_scribereader_envs', autospec=True),
