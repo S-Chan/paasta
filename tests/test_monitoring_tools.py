@@ -301,6 +301,7 @@ class TestMonitoring_Tools:
         fake_tip = 'fake_tip'
         fake_notification_email = 'fake@notify'
         fake_irc = '#fake'
+        fake_alert_every = 2
         fake_soa_dir = '/fake/soa/dir'
         self.fake_cluster = 'fake_cluster'
         fake_sensu_host = 'fake_sensu_host'
@@ -316,7 +317,7 @@ class TestMonitoring_Tools:
             'page': True,
             'alert_after': '5m',
             'check_every': '1m',
-            'realert_every': -1,
+            'realert_every': fake_alert_every,
             'source': 'paasta-fake_cluster',
             'ttl': None,
         }
@@ -356,6 +357,11 @@ class TestMonitoring_Tools:
                 return_value=True,
                 autospec=True,
             ),
+            mock.patch(
+                "paasta_tools.monitoring_tools.get_realert_every",
+                return_value=fake_alert_every,
+                autospec=True,
+            ),
             mock.patch("pysensu_yelp.send_event", autospec=True),
             mock.patch('paasta_tools.monitoring_tools.load_system_paasta_config', autospec=True),
         ) as (
@@ -366,6 +372,7 @@ class TestMonitoring_Tools:
             get_ticket_patch,
             get_project_patch,
             get_page_patch,
+            get_realert_every_patch,
             pysensu_yelp_send_event_patch,
             load_system_paasta_config_patch,
         ):
@@ -403,6 +410,11 @@ class TestMonitoring_Tools:
                 fake_soa_dir
             )
             get_page_patch.assert_called_once_with(
+                fake_monitoring_overrides,
+                fake_service,
+                fake_soa_dir
+            )
+            get_realert_every_patch.assert_called_once_with(
                 fake_monitoring_overrides,
                 fake_service,
                 fake_soa_dir
